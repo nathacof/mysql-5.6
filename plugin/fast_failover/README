@@ -1,0 +1,58 @@
+# Fast Failover Plugin for automatic master promotion
+
+This plugin requires a few databases to maintain state of a given "Replica Set".
+
+## Topology
+
+This database is used to store connection information about members of the replica 
+set. The data stored here will include (ip, port, op_mask) where the opmask represents
+the capabilities of the service (read-only, read-write, disabled). This topology should
+be pre-populated if you are enabling this plugin on a production deployment.
+
+TODO: just write a script that populates the tables from existing deployments, we'll reserve 
+the first few bits of the opmask for our purposes.
+
+## Write Penalties
+
+Also a supplemental table will be necessary which allows the user to influence our choice of master.
+We will always choose the replica with the highest gtid_executed during promotion, but this may
+not be the ideal candidate. Using a table writeable by the administrator we can map services to
+write penalties. For example our application is unable to handle additional latencies introduced 
+by x-pacific links we might have the following write penalties:
+
+(us.example.com, 3306) 0
+(ca.example.com, 3307) 2
+(eu.example.com, 3300) 10
+
+This should be extended by the user to rank services for master election. Hardware characteristics
+are another example where you may want to override the selection behavior.
+
+## Database Capabilities
+
+Table to map database status (read-write, read-only, disabled) to services. For example if we want to disable
+reads on (eu.example.com, 3300) but only for database foo.
+
+# Implementation
+
+A monitor thread will establish a new connection to the master periodically.
+
+After which they will update the topology and capabilities tables with
+their current capabilities. 
+
+When we fail to communicate with the master the monitor thread will update a system variable
+"fast_failover_master_status" indicating the mysql errno from the failure.
+
+The monitor thread should then connect to all members of the replicaset to fetch the same
+"fast_failover_master_status" system variable. If a quorum is reached we will begin election procedures.
+
+## Election
+
+At this point the monitor_thread will check the gtid_executed of all replicas. If it is the leader,
+it should set read-only=0 and update the topology database. When replicas see that another member of the
+replica set has become writable, they should attempt to CHANGE MASTER TO this instance.
+
+# Crashed instances
+
+During plugin load we should read our topology database, and reach out to the members of our replicaset 
+to verify these tables match. If not we should disable ourselves, CHANGE MASTER TO based on the latest
+topology information.
